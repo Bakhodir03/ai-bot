@@ -68,6 +68,29 @@ class GeminiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(requests[0].headers["Authorization"], "Bearer gemini-test-key")
         self.assertEqual(json.loads(requests[0].content)["model"], "gemini-test")
 
+    async def test_gemini_uses_fallback_after_primary_is_overloaded(self):
+        requests = []
+
+        def respond(request):
+            requests.append(json.loads(request.content))
+            if len(requests) < 4:
+                return httpx.Response(503, request=request, json={"error": "busy"})
+            return httpx.Response(200, json={"choices": [{"message": {"content": "OK"}}]})
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+        try:
+            with patch.object(ai, "GEMINI_API_KEY", "gemini-test-key"), \
+                    patch.object(ai, "GEMINI_MODEL", "primary-model"), \
+                    patch.object(ai, "GEMINI_FALLBACK_MODEL", "fallback-model"), \
+                    patch("ai.asyncio.sleep", new_callable=AsyncMock):
+                answer = await ai.gemini_complete([{"role": "user", "content": "Hello"}], client=client)
+        finally:
+            await client.aclose()
+        self.assertEqual(answer, "OK")
+        self.assertEqual([item["model"] for item in requests], [
+            "primary-model", "primary-model", "primary-model", "fallback-model",
+        ])
+
 class ConfigTests(unittest.TestCase):
     def test_gemini_does_not_require_openai_key(self):
         with patch.multiple(config, AI_PROVIDER="gemini", GEMINI_API_KEY="fake-key",

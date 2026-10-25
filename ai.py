@@ -1,17 +1,21 @@
 """Gemini and OpenAI clients with local knowledge and conversation context."""
+import asyncio
 import json
+import logging
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import httpx
 from openai import AsyncOpenAI, APIConnectionError, APIStatusError, AuthenticationError, RateLimitError
 from config import (
-    AI_PROVIDER, GEMINI_API_KEY, GEMINI_MODEL,
+    AI_PROVIDER, GEMINI_API_KEY, GEMINI_MODEL, GEMINI_FALLBACK_MODEL,
     OPENAI_API_KEY, OPENAI_MODEL, KNOWLEDGE_PATH,
 )
 
 _client = None
 GEMINI_CHAT_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+GEMINI_TRANSIENT_STATUSES = {429, 500, 502, 503, 504}
+logger = logging.getLogger(__name__)
 
 SYSTEM_RULES = """
 You are an AI helper for a personal Telegram bot.
@@ -130,25 +134,47 @@ def style_rules(profile: dict | None) -> str:
 
 
 async def gemini_complete(messages: list[dict], *, client: httpx.AsyncClient | None = None) -> str:
-    """Call Gemini's documented OpenAI-compatible REST endpoint without the blocked SDK DLL."""
-    payload = {
-        "model": GEMINI_MODEL,
-        "messages": messages,
-        "max_completion_tokens": 2048,
-        "reasoning_effort": "minimal",
-    }
+    """Call Gemini and tolerate short provider overloads without duplicating replies."""
     headers = {"Authorization": f"Bearer {GEMINI_API_KEY}", "Content-Type": "application/json"}
-    if client is None:
+    models = [GEMINI_MODEL]
+    if GEMINI_FALLBACK_MODEL and GEMINI_FALLBACK_MODEL not in models:
+        models.append(GEMINI_FALLBACK_MODEL)
+
+    async def request_for(model: str) -> httpx.Response:
+        payload = {
+            "model": model,
+            "messages": messages,
+            "max_completion_tokens": 2048,
+            "reasoning_effort": "minimal",
+        }
+        if client is not None:
+            return await client.post(GEMINI_CHAT_URL, headers=headers, json=payload)
         async with httpx.AsyncClient(timeout=35.0) as own_client:
-            response = await own_client.post(GEMINI_CHAT_URL, headers=headers, json=payload)
-    else:
-        response = await client.post(GEMINI_CHAT_URL, headers=headers, json=payload)
-    response.raise_for_status()
-    choices = response.json().get("choices") or []
-    answer = choices[0].get("message", {}).get("content") if choices else ""
-    if not isinstance(answer, str) or not answer.strip():
-        raise RuntimeError("AI returned no text")
-    return answer.strip()
+            return await own_client.post(GEMINI_CHAT_URL, headers=headers, json=payload)
+
+    for model_index, model in enumerate(models):
+        # Two short retries handle transient 503 bursts without making a chat wait too long.
+        for attempt in range(3):
+            response = await request_for(model)
+            try:
+                response.raise_for_status()
+            except httpx.HTTPStatusError as error:
+                transient = error.response.status_code in GEMINI_TRANSIENT_STATUSES
+                if transient and attempt < 2:
+                    await asyncio.sleep(attempt + 1)
+                    continue
+                if transient and model_index + 1 < len(models):
+                    logger.warning("Gemini model %s unavailable; trying fallback model", model)
+                    break
+                raise
+
+            choices = response.json().get("choices") or []
+            answer = choices[0].get("message", {}).get("content") if choices else ""
+            if not isinstance(answer, str) or not answer.strip():
+                raise RuntimeError("AI returned no text")
+            return answer.strip()
+
+    raise RuntimeError("Gemini did not return a response")
 
 
 async def complete_text(instructions: str, conversation: list[dict]) -> str:
