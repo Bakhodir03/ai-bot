@@ -1,0 +1,12 @@
+# Bot knowledge (example only; replace with verified public facts)
+
+No company details, schedules, official phone numbers, or prices have been
+configured yet. This file contains factual reference data only. Language,
+assistant identity and routing rules are configured in the application.
+
+# Examples to edit when ready:
+# Organization name: <your verified name>
+# Services: <official descriptions>
+# Business hours: <verified hours>
+# Contact details: <public information only>
+# Common questions and verified answers: <your data>
