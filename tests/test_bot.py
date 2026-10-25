@@ -193,6 +193,11 @@ class BusinessReplyTests(unittest.IsolatedAsyncioTestCase):
 
 
 class RuntimeTests(unittest.IsolatedAsyncioTestCase):
+    def test_application_allows_parallel_updates(self):
+        with patch.object(bot, "TELEGRAM_BOT_TOKEN", "123:test"):
+            app = bot.build_application()
+        self.assertEqual(app.update_processor.max_concurrent_updates, 4)
+
     async def test_conflict_stops_polling(self):
         application = SimpleNamespace(stop_running=Mock())
         await bot.handle_error(None, SimpleNamespace(error=Conflict("test"), application=application))

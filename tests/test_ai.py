@@ -73,7 +73,7 @@ class GeminiTests(unittest.IsolatedAsyncioTestCase):
 
         def respond(request):
             requests.append(json.loads(request.content))
-            if len(requests) < 4:
+            if len(requests) < 3:
                 return httpx.Response(503, request=request, json={"error": "busy"})
             return httpx.Response(200, json={"choices": [{"message": {"content": "OK"}}]})
 
@@ -88,7 +88,7 @@ class GeminiTests(unittest.IsolatedAsyncioTestCase):
             await client.aclose()
         self.assertEqual(answer, "OK")
         self.assertEqual([item["model"] for item in requests], [
-            "primary-model", "primary-model", "primary-model", "fallback-model",
+            "primary-model", "primary-model", "fallback-model",
         ])
 
 class ConfigTests(unittest.TestCase):

@@ -1,4 +1,5 @@
 """Telegram Business helper controlled from the owner's private bot chat."""
+import asyncio
 import logging
 import re
 import time
@@ -11,7 +12,7 @@ from telegram.ext import (
     ApplicationBuilder, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters,
 )
 
-from ai import plan_business_reply
+from ai import close_ai_clients, plan_business_reply
 from config import (
     ADMIN_TELEGRAM_ID, BUSINESS_REPLY_MODE, DATA_RETENTION_DAYS, MAX_AUTO_REPLY_AGE_SECONDS,
     TELEGRAM_BOT_TOKEN, ROOT, WELCOME_STICKER_ID, validate_config,
@@ -41,6 +42,7 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 _requests = defaultdict(deque)
+_business_chat_locks: dict[tuple[str, int], asyncio.Lock] = {}
 HUMAN_TAKEOVER_SECONDS = 24 * 60 * 60
 
 
@@ -137,6 +139,17 @@ async def handle_owner_business_message(message, context: ContextTypes.DEFAULT_T
 
 
 async def handle_business_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Parallelize different chats while preserving message order within one chat."""
+    message = update.business_message
+    if not message or not message.business_connection_id or not message.chat:
+        return
+    key = (message.business_connection_id, message.chat_id)
+    lock = _business_chat_locks.setdefault(key, asyncio.Lock())
+    async with lock:
+        await _handle_business_message(update, context)
+
+
+async def _handle_business_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Reply through an authorized personal-account connection, never as the standalone bot."""
     message = update.business_message
     if not message or not message.business_connection_id or not ADMIN_TELEGRAM_ID:
@@ -324,8 +337,16 @@ async def post_init(application):
     ])
 
 
+async def post_shutdown(application):
+    await close_ai_clients()
+
+
 def build_application():
-    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).build()
+    app = (ApplicationBuilder().token(TELEGRAM_BOT_TOKEN)
+           .concurrent_updates(4)
+           .post_init(post_init)
+           .post_shutdown(post_shutdown)
+           .build())
     ordinary = filters.UpdateType.MESSAGE & filters.ChatType.PRIVATE
     app.add_handler(MessageHandler(
         filters.UpdateType.BUSINESS_MESSAGE & filters.ChatType.PRIVATE
